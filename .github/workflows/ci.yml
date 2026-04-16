@@ -26,19 +26,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install core dependencies
+      - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install \
-            Pillow \
-            cryptography \
-            piexif \
-            click \
-            rich
-
-      - name: Install optional dependencies (best-effort)
-        run: |
-          pip install pikepdf python-docx mutagen scipy || true
+          pip install -r requirements.txt
 
       - name: Run tests
         env:
@@ -50,8 +41,7 @@ jobs:
             --timeout=120
 
       - name: Verify CLI entry point
-        run: |
-          python nulltrace.py --version
+        run: python nulltrace.py --version
 
   lint:
     name: Lint
@@ -65,7 +55,7 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install linters
+      - name: Install ruff
         run: pip install ruff
 
       - name: Run ruff
