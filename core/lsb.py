@@ -137,6 +137,118 @@ def hide(image_path: str, payload: bytes, password: str, output_path: str) -> No
     os.utime(output_path, original_times)
 
 
+def hide_dual(image_path: str,
+              real_payload:   bytes, real_password:  str,
+              decoy_payload:  bytes, decoy_password: str,
+              output_path: str) -> None:
+    """
+    Plausible deniability: embed TWO independent payloads in the same image.
+
+    Mechanism — dual-bit plane embedding:
+      Decoy uses bit 0 (LSB) of PRNG-selected pixels  (seeded by decoy_password)
+      Real  uses bit 1 (2nd bit) of PRNG-selected pixels (seeded by real_password)
+
+    The two bit planes are completely independent — zero interference.
+    Changing bit 1 alters pixel values by at most 2 — imperceptible.
+
+    Extraction:
+      extract(image, decoy_password) -> decoy message  (when compelled)
+      extract_real(image, real_password) -> real payload (the actual secret)
+
+    Neither extractor knows the other payload exists.
+    """
+    path = Path(image_path)
+    if path.suffix.lower() not in SUPPORTED:
+        raise ValueError(f"Unsupported format '{path.suffix}'.")
+
+    stat = os.stat(image_path)
+    original_times = (stat.st_atime, stat.st_mtime)
+
+    original = Image.open(image_path)
+    original_info = original.info.copy()
+    img = original.convert('RGB')
+    w, h = img.size
+    pixels   = list(img.getdata())
+    n_pixels = len(pixels)
+
+    # Capacity check for both payloads
+    cap = (n_pixels * 3) // 8 - LENGTH_BYTES
+    for name, payload in [('Decoy', decoy_payload), ('Real', real_payload)]:
+        if len(payload) > cap:
+            raise ValueError(
+                f"{name} payload too large ({len(payload)} bytes). "
+                f"Max capacity: {cap} bytes."
+            )
+
+    decoy_order = _get_pixel_order(decoy_password, n_pixels)
+    real_order  = _get_pixel_order(real_password,  n_pixels)
+
+    decoy_framed = struct.pack('<I', len(decoy_payload)) + decoy_payload
+    real_framed  = struct.pack('<I', len(real_payload))  + real_payload
+
+    decoy_bits = _bytes_to_bits(decoy_framed)
+    real_bits  = _bytes_to_bits(real_framed)
+
+    pixels_mut = [list(p) for p in pixels]
+
+    # Embed DECOY into bit 0 (LSB) of decoy_order pixels
+    for bit_pos, bit in enumerate(decoy_bits):
+        pix_idx = decoy_order[bit_pos // 3]
+        channel = bit_pos % 3
+        pixels_mut[pix_idx][channel] = (pixels_mut[pix_idx][channel] & 0xFE) | bit
+
+    # Embed REAL into bit 1 of real_order pixels (zero interference with bit 0)
+    for bit_pos, bit in enumerate(real_bits):
+        pix_idx = real_order[bit_pos // 3]
+        channel = bit_pos % 3
+        # Clear bit 1, set to our bit
+        pixels_mut[pix_idx][channel] = (pixels_mut[pix_idx][channel] & 0xFD) | (bit << 1)
+
+    out_img = Image.new('RGB', img.size)
+    out_img.putdata([tuple(p) for p in pixels_mut])
+
+    save_kwargs = {}
+    if 'exif'        in original_info: save_kwargs['exif']        = original_info['exif']
+    if 'icc_profile' in original_info: save_kwargs['icc_profile'] = original_info['icc_profile']
+    if 'dpi'         in original_info: save_kwargs['dpi']         = original_info['dpi']
+
+    out_img.save(output_path, **save_kwargs)
+    os.utime(output_path, original_times)
+
+
+def extract_real(image_path: str, password: str) -> bytes:
+    """
+    Extract the REAL payload from a dual-embedded image.
+    Reads from bit 1 of PRNG-selected pixels (seeded by password).
+    Returns raw (still-encrypted) bytes.
+    """
+    img         = Image.open(image_path).convert('RGB')
+    pixels      = list(img.getdata())
+    n_pixels    = len(pixels)
+    pixel_order = _get_pixel_order(password, n_pixels)
+
+    def read_bit1(n_bits: int, start: int) -> list:
+        bits = []
+        for i in range(n_bits):
+            pos     = start + i
+            pix_idx = pixel_order[pos // 3]
+            channel = pos % 3
+            # Read bit 1 (second-least-significant)
+            bits.append((pixels[pix_idx][channel] >> 1) & 1)
+        return bits
+
+    length_bits = read_bit1(32, 0)
+    length      = struct.unpack('<I', _bits_to_bytes(length_bits))[0]
+
+    if length == 0 or length > (n_pixels * 3) // 8:
+        raise ValueError(
+            "No valid real payload found (wrong password or no dual payload embedded)."
+        )
+
+    payload_bits = read_bit1(length * 8, 32)
+    return _bits_to_bytes(payload_bits)
+
+
 def extract(image_path: str, password: str) -> bytes:
     """
     Reconstruct payload from image LSBs using the same PRNG pixel order.

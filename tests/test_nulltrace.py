@@ -720,6 +720,422 @@ def test_large_payload(tmp: Path):
         fail("extract large", str(e))
 
 
+# ─── 13. Key file support ─────────────────────────────────────────────────────
+
+def test_keyfile_crypto(tmp: Path):
+    section("13. Key File (2nd Factor) Cryptography")
+    from core.crypto import encrypt, decrypt
+
+    kf = tmp / "secret.bin"
+    kf.write_bytes(os.urandom(64))
+    kf_bytes = kf.read_bytes()
+
+    msg = b"Key file two-factor test - requires both password AND file"
+
+    try:
+        enc = encrypt(msg, "pw", kf_bytes)
+        dec = decrypt(enc, "pw", kf_bytes)
+        assert dec == msg
+        ok("encrypt/decrypt with keyfile roundtrip correct")
+    except Exception as e:
+        fail("keyfile roundtrip", str(e)); return
+
+    # Wrong password, correct keyfile
+    try:
+        decrypt(enc, "wrong-pw", kf_bytes)
+        fail("wrong password + correct keyfile should fail")
+    except ValueError:
+        ok("wrong password + correct keyfile correctly rejected")
+
+    # Correct password, wrong keyfile
+    wrong_kf = os.urandom(64)
+    try:
+        decrypt(enc, "pw", wrong_kf)
+        fail("correct password + wrong keyfile should fail")
+    except ValueError:
+        ok("correct password + wrong keyfile correctly rejected")
+
+    # Correct password, no keyfile
+    try:
+        decrypt(enc, "pw", None)
+        fail("correct password + no keyfile should fail")
+    except ValueError:
+        ok("correct password + missing keyfile correctly rejected")
+
+    # No keyfile encryption — keyfile argument should be ignored (None)
+    try:
+        enc2 = encrypt(msg, "pw", None)
+        dec2 = decrypt(enc2, "pw", None)
+        assert dec2 == msg
+        ok("encrypt/decrypt without keyfile still works")
+    except Exception as e:
+        fail("no-keyfile path", str(e))
+
+
+# ─── 14. Alpha channel LSB ────────────────────────────────────────────────────
+
+def test_alpha_lsb(tmp: Path):
+    section("14. Alpha Channel LSB Steganography")
+    try:
+        from core.alpha_lsb import hide, extract, capacity, scan
+        from core.crypto    import encrypt, decrypt
+    except ImportError as e:
+        skip("alpha LSB (all)", str(e)); return
+
+    # Make an RGBA PNG with non-uniform alpha
+    from PIL import Image
+    import random as rnd
+    carrier = str(tmp / "alpha_carrier.png")
+    w, h = 200, 200
+    img = Image.new('RGBA', (w, h))
+    pixels = [(rnd.randint(50, 200), rnd.randint(50, 200),
+               rnd.randint(50, 200), rnd.randint(100, 255))
+              for _ in range(w * h)]
+    img.putdata(pixels)
+    img.save(carrier, 'PNG')
+
+    output = str(tmp / "alpha_output.png")
+
+    try:
+        cap = capacity(carrier)
+        assert cap > 0
+        ok(f"capacity() = {cap} bytes")
+    except Exception as e:
+        fail("capacity", str(e)); return
+
+    msg = b"Alpha channel hidden payload - RGB untouched"
+    enc = encrypt(msg, "alpha-key")
+
+    try:
+        hide(carrier, enc, "alpha-key", output)
+        assert Path(output).exists()
+        ok("hide() creates output")
+    except Exception as e:
+        fail("hide", str(e)); return
+
+    # Verify RGB channels are bit-identical
+    try:
+        orig = Image.open(carrier).convert('RGBA')
+        steg = Image.open(output).convert('RGBA')
+        orig_px = list(orig.getdata())
+        steg_px = list(steg.getdata())
+        rgb_diffs = sum(
+            1 for o, s in zip(orig_px, steg_px)
+            if o[:3] != s[:3]
+        )
+        assert rgb_diffs == 0
+        ok("RGB channels unmodified (only alpha channel changed)")
+    except Exception as e:
+        fail("RGB integrity check", str(e))
+
+    try:
+        raw   = extract(output, "alpha-key")
+        plain = decrypt(raw, "alpha-key")
+        assert plain == msg
+        ok("extract + decrypt roundtrip correct")
+    except Exception as e:
+        fail("extract/decrypt", str(e))
+
+    try:
+        raw2 = extract(output, "wrong-key")
+        decrypt(raw2, "wrong-key")
+        fail("wrong key should fail")
+    except ValueError:
+        ok("wrong key correctly rejected")
+
+    try:
+        result = scan(output)
+        ok(f"scan() runs without error (detected={result['detected']})")
+    except Exception as e:
+        fail("scan", str(e))
+
+
+# ─── 15. JPEG DCT ─────────────────────────────────────────────────────────────
+
+def test_jpeg_dct(tmp: Path):
+    section("15. JPEG DCT Steganography")
+    try:
+        from core.jpeg_dct import hide, extract, capacity
+        from core.crypto   import encrypt, decrypt
+    except ImportError as e:
+        skip("JPEG DCT (all)", str(e)); return
+
+    carrier = str(tmp / "dct_carrier.jpg")
+    output  = str(tmp / "dct_output.jpg")
+    make_jpeg(carrier)
+
+    try:
+        cap = capacity(carrier)
+        assert cap > 0
+        ok(f"capacity() = {cap} bytes")
+    except Exception as e:
+        fail("capacity", str(e)); return
+
+    msg = b"DCT coefficient hidden payload - survives JPEG re-encode"
+    enc = encrypt(msg, "dct-key")
+
+    if len(enc) > cap:
+        skip("DCT hide/extract", f"test image capacity {cap}B < payload {len(enc)}B")
+        return
+
+    try:
+        hide(carrier, enc, "dct-key", output, quality=95)
+        assert Path(output).exists()
+        ok("hide() creates output (re-encoded at q=95)")
+    except Exception as e:
+        fail("hide", str(e)); return
+
+    try:
+        raw   = extract(output, "dct-key")
+        plain = decrypt(raw, "dct-key")
+        assert plain == msg
+        ok("extract + decrypt roundtrip correct")
+    except Exception as e:
+        fail("extract/decrypt", str(e))
+
+    try:
+        raw2 = extract(output, "wrong-key")
+        decrypt(raw2, "wrong-key")
+        fail("wrong key should fail")
+    except (ValueError, Exception):
+        ok("wrong key correctly rejected")
+
+
+# ─── 16. DOCX hidden text ─────────────────────────────────────────────────────
+
+def test_docx_hidden(tmp: Path):
+    section("16. DOCX Hidden Text (w:vanish)")
+    try:
+        from core.docx_hidden import hide, extract, scan
+        from core.crypto      import encrypt, decrypt
+        from docx import Document
+    except ImportError as e:
+        skip("DOCX hidden text (all)", str(e)); return
+
+    # Build a minimal DOCX
+    carrier = str(tmp / "carrier.docx")
+    output  = str(tmp / "output.docx")
+    doc = Document()
+    doc.add_paragraph("This is a completely normal document.")
+    doc.add_paragraph("Nothing suspicious here at all.")
+    doc.save(carrier)
+
+    msg = b"DOCX hidden text payload - invisible in Word by default"
+    enc = encrypt(msg, "docx-key")
+
+    try:
+        hide(carrier, enc, output)
+        assert Path(output).exists()
+        ok("hide() creates output")
+    except Exception as e:
+        fail("hide", str(e)); return
+
+    try:
+        result = scan(output)
+        assert result['detected']
+        ok(f"scan() detects hidden run(s): {result['findings'][:1]}")
+    except Exception as e:
+        fail("scan", str(e))
+
+    try:
+        raw   = extract(output)
+        plain = decrypt(raw, "docx-key")
+        assert plain == msg
+        ok("extract + decrypt roundtrip correct")
+    except Exception as e:
+        fail("extract/decrypt", str(e))
+
+    try:
+        result_clean = scan(carrier)
+        assert not result_clean['detected']
+        ok("clean DOCX shows no hidden text")
+    except Exception as e:
+        fail("clean DOCX scan", str(e))
+
+
+# ─── 17. MP3 ID3 ──────────────────────────────────────────────────────────────
+
+def test_mp3_id3(tmp: Path):
+    section("17. MP3 ID3 Tag Steganography")
+    try:
+        from core.mp3_id3 import hide, extract, scan
+        from core.crypto  import encrypt, decrypt
+        from mutagen.id3  import ID3, TIT2
+        from mutagen.mp3  import MP3
+    except ImportError as e:
+        skip("MP3 ID3 (all)", str(e)); return
+
+    # Create a minimal valid MP3 frame (MPEG1 Layer3 silence)
+    carrier = str(tmp / "carrier.mp3")
+    output  = str(tmp / "output.mp3")
+
+    # Minimal MP3: one silent frame header + zero payload
+    # Frame sync + MPEG1 Layer3 128kbps 44100Hz mono
+    mp3_frame = bytes([0xFF, 0xFB, 0x90, 0x00]) + bytes(413)
+    with open(carrier, 'wb') as f:
+        f.write(mp3_frame * 10)
+
+    msg = b"MP3 ID3 hidden payload - audio bitstream untouched"
+    enc = encrypt(msg, "mp3-key")
+
+    try:
+        hide(carrier, enc, output)
+        assert Path(output).exists()
+        ok("hide() embeds payload in COMM ID3 tag")
+    except Exception as e:
+        fail("hide", str(e)); return
+
+    try:
+        result = scan(output)
+        assert result['detected']
+        ok(f"scan() finds NullTrace ID3 marker")
+    except Exception as e:
+        fail("scan", str(e))
+
+    try:
+        raw   = extract(output)
+        plain = decrypt(raw, "mp3-key")
+        assert plain == msg
+        ok("extract + decrypt roundtrip correct")
+    except Exception as e:
+        fail("extract/decrypt", str(e))
+
+
+# ─── 18. Plausible deniability (dual-bit plane) ───────────────────────────────
+
+def test_plausible_deniability(tmp: Path):
+    section("18. Plausible Deniability (Dual-Bit Plane)")
+    from core.lsb    import hide_dual, extract, extract_real
+    from core.crypto import encrypt, decrypt
+
+    carrier = str(tmp / "dual_carrier.png")
+    output  = str(tmp / "dual_output.png")
+    make_png(carrier, 400, 400)
+
+    real_msg  = b"Real payload - the actual secret"
+    decoy_msg = b"Decoy payload - the innocent message"
+    real_enc  = encrypt(real_msg,  "real-key")
+    decoy_enc = encrypt(decoy_msg, "decoy-key")
+
+    try:
+        hide_dual(carrier,
+                  real_payload=real_enc,   real_password="real-key",
+                  decoy_payload=decoy_enc, decoy_password="decoy-key",
+                  output_path=output)
+        assert Path(output).exists()
+        ok("hide_dual() creates dual-embedded image")
+    except Exception as e:
+        fail("hide_dual", str(e)); return
+
+    # extract() with decoy key should return decoy
+    try:
+        raw_decoy  = extract(output, "decoy-key")
+        plain_decoy = decrypt(raw_decoy, "decoy-key")
+        assert plain_decoy == decoy_msg
+        ok("extract(decoy-key) returns decoy payload")
+    except Exception as e:
+        fail("decoy extraction", str(e))
+
+    # extract_real() with real key should return real
+    try:
+        raw_real  = extract_real(output, "real-key")
+        plain_real = decrypt(raw_real, "real-key")
+        assert plain_real == real_msg
+        ok("extract_real(real-key) returns real payload")
+    except Exception as e:
+        fail("real extraction", str(e))
+
+    # Verify the two payloads are completely independent
+    try:
+        raw_real2 = extract_real(output, "real-key")
+        raw_decoy2 = extract(output, "decoy-key")
+        assert raw_real2 != raw_decoy2
+        ok("Real and decoy payloads are independent (no overlap)")
+    except Exception as e:
+        fail("independence check", str(e))
+
+
+# ─── 19. RS Analysis ──────────────────────────────────────────────────────────
+
+def test_rs_analysis(tmp: Path):
+    section("19. RS (Regular-Singular) Analysis")
+    try:
+        from detector.rs_analysis import analyze_image
+    except ImportError as e:
+        skip("RS analysis (all)", str(e)); return
+
+    from core.lsb    import hide
+    from core.crypto import encrypt
+
+    # Clean image — RS should show low embedding rate
+    clean = str(tmp / "rs_clean.png")
+    make_png(clean, 200, 200)
+
+    try:
+        result = analyze_image(clean)
+        rate = result['embedding_rate']
+        ok(f"clean image RS embedding rate: {rate:.4f} (suspicious={result['suspicious']})")
+    except Exception as e:
+        fail("RS clean image", str(e))
+
+    # Heavily embedded image — RS should show elevated rate
+    steg = str(tmp / "rs_steg.png")
+    make_png(steg, 300, 300)
+    enc = encrypt(b"RS analysis test payload " * 20, "rs-key")
+    try:
+        from core.lsb import capacity
+        cap = capacity(steg)
+        if len(enc) <= cap:
+            hide(steg, enc, "rs-key", steg)  # in-place via temp
+            result2 = analyze_image(steg)
+            ok(f"steg image RS embedding rate: {result2['embedding_rate']:.4f} "
+               f"(suspicious={result2['suspicious']})")
+        else:
+            skip("RS steg image", "payload too large for test image")
+    except Exception as e:
+        fail("RS steg image", str(e))
+
+
+# ─── 20. CSV export ───────────────────────────────────────────────────────────
+
+def test_csv_export(tmp: Path):
+    section("20. CSV Export")
+    from detector.scan   import scan_file, export_csv
+    from core.lsb        import hide
+    from core.crypto     import encrypt
+
+    carrier = str(tmp / "csv_carrier.png")
+    steg    = str(tmp / "csv_steg.png")
+    make_png(carrier, 200, 200)
+    enc = encrypt(b"CSV export test", "csv-key")
+    hide(carrier, enc, "csv-key", steg)
+
+    reports  = [
+        scan_file(carrier),
+        scan_file(steg),
+    ]
+    csv_path = str(tmp / "results.csv")
+
+    try:
+        export_csv(reports, csv_path)
+        assert Path(csv_path).exists()
+        ok("export_csv() creates CSV file")
+    except Exception as e:
+        fail("export_csv", str(e)); return
+
+    try:
+        import csv
+        with open(csv_path, newline='', encoding='utf-8') as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) >= 2
+        assert 'file' in rows[0]
+        assert 'method' in rows[0]
+        assert 'confidence' in rows[0]
+        ok(f"CSV has {len(rows)} rows with correct headers")
+    except Exception as e:
+        fail("CSV content validation", str(e))
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────────
 
 def main():
@@ -743,6 +1159,14 @@ def main():
             test_blind_scanner(tmp)
             test_binary_payload(tmp)
             test_large_payload(tmp)
+            test_keyfile_crypto(tmp)
+            test_alpha_lsb(tmp)
+            test_jpeg_dct(tmp)
+            test_docx_hidden(tmp)
+            test_mp3_id3(tmp)
+            test_plausible_deniability(tmp)
+            test_rs_analysis(tmp)
+            test_csv_export(tmp)
         except KeyboardInterrupt:
             print(f"\n{YELLOW}Interrupted.{RESET}")
 

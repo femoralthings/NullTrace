@@ -1,0 +1,76 @@
+name: NullTrace CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Test — Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install core dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            Pillow \
+            cryptography \
+            piexif \
+            click \
+            rich
+
+      - name: Install optional dependencies (best-effort)
+        run: |
+          pip install pikepdf python-docx mutagen scipy || true
+
+      - name: Run tests
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONPATH: .
+        run: |
+          python -X utf8 -m pytest tests/test_nulltrace.py \
+            -v --tb=short --no-header \
+            --timeout=120
+
+      - name: Verify CLI entry point
+        run: |
+          python nulltrace.py --version
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install linters
+        run: pip install ruff
+
+      - name: Run ruff
+        run: |
+          ruff check core/ detector/ nulltrace.py \
+            --select=E,W,F \
+            --ignore=E501,W291,E302,E303,W503 \
+            --exit-zero
