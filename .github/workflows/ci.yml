@@ -62,5 +62,5 @@ jobs:
         run: |
           ruff check core/ detector/ nulltrace.py \
             --select=E,W,F \
-            --ignore=E501,W291,E302,E303,W503 \
+            --ignore=E501,W291,E302,E303 \
             --exit-zero
