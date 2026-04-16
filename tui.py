@@ -33,7 +33,7 @@ BANNER = """\
 
 TAGLINE = "Multi-carrier steganography toolkit"
 SUBLINE  = "Leave no fingerprints."
-VERSION  = "v2.0.0"
+VERSION  = "v1.0.0"
 
 METHOD_OPTIONS = [
     ("auto      — detect from file extension",  "auto"),

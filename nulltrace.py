@@ -69,7 +69,7 @@ KEYFILE_OPTION = click.option(
 # ── CLI group ─────────────────────────────────────────────────────────────────
 
 @click.group()
-@click.version_option(version='2.0.0', prog_name='NullTrace')
+@click.version_option(version='1.0.0', prog_name='NullTrace')
 def cli():
     """NullTrace — steganography toolkit. Hide and detect data in files."""
     pass
